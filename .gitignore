@@ -1,0 +1,11 @@
+output/
+dl/
+.config
+.config.old
+*.o
+*.ko
+*.elf
+*.bin
+*.cpio
+*.ext2
+board/custom_rv32/overlay/usr/bin/*
