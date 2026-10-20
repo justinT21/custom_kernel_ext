@@ -1,0 +1,38 @@
+# Applied on top of arch/riscv/configs/nommu_virt_defconfig (rv64 nommu).
+# The kernel runs in M-mode with no SBI firmware. All hardware addresses
+# come from the DTB, so the same image boots on QEMU virt (-bios none),
+# Spike and a custom core whose DT describes a CLINT, a PLIC and either a
+# ns16550 or a SiFive UART.
+
+CONFIG_NONPORTABLE=y
+CONFIG_ARCH_RV32I=y
+CONFIG_RISCV_M_MODE=y
+CONFIG_FPU=y
+# CONFIG_SMP is not set
+
+# Link the kernel at the start of DRAM instead of building it relocatable
+# (link address 0). This lets the vmlinux ELF be loaded directly by QEMU,
+# Spike or a debugger/loader on real hardware. Change it if your DRAM is
+# elsewhere.
+CONFIG_PHYS_RAM_BASE_FIXED=y
+CONFIG_PHYS_RAM_BASE=0x80000000
+# nommu_virt_defconfig selects this before PHYS_RAM_BASE_FIXED is set, and
+# the fragment merge would otherwise keep it.
+# CONFIG_RELOCATABLE is not set
+
+# UARTs: ns16550 (QEMU virt, Spike; ttyS0) is already enabled by
+# nommu_virt_defconfig. Add the SiFive UART (sifive,uart0; ttySIF0) for
+# custom cores. Whichever one the DT's /chosen/stdout-path points to becomes
+# the early console and the console.
+CONFIG_SERIAL_SIFIVE=y
+CONFIG_SERIAL_SIFIVE_CONSOLE=y
+
+# The rootfs is an initramfs linked into the kernel, so no root= is needed.
+# No console= so the console follows stdout-path (see above). Used only when
+# the bootloader passes no bootargs (QEMU without -append); Spike always
+# passes its own.
+CONFIG_CMDLINE="earlycon"
+CONFIG_CMDLINE_FALLBACK=y
+# CONFIG_CMDLINE_FORCE is not set
+
+CONFIG_KALLSYMS=y

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Boot the no-MMU M-mode kernel on QEMU virt. There is no firmware: QEMU
+# jumps straight to the kernel in M-mode with a0=hartid, a1=dtb.
+# Extra arguments are passed through to QEMU (e.g. -s -S for gdb).
+
+IMAGE_DIR="$(dirname "$0")"
+PATH="@HOST_DIR@/bin:${PATH}"
+
+exec qemu-system-riscv32 \
+    -M virt \
+    -cpu rv32,mmu=off \
+    -bios none \
+    -m 128M \
+    -nographic \
+    -kernel "${IMAGE_DIR}/kernel.elf" \
+    "$@"
