@@ -12,7 +12,7 @@ see [Run without building](#run-without-building-prebuilt).
 
 ## Run without building (prebuilt/)
 
-`prebuilt/` has a ready-to-boot copy of the image from a known build. It
+The tagged releases have a ready-to-boot copy of the image from a known build. It
 only needs your system's QEMU or Spike:
 
 - QEMU: Debian/Ubuntu `sudo apt install qemu-system-misc`, Arch
