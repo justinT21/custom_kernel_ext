@@ -9,3 +9,4 @@ dl/
 *.cpio
 *.ext2
 board/custom_rv32/overlay/usr/bin/*
+!prebuilt/kernel.elf

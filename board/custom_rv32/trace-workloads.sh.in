@@ -1,0 +1,91 @@
+#!/bin/sh
+# Capture the standard workload traces and their statistics
+# (docs/tracing.md, "Saved workload traces").
+#
+#   trace-workloads.sh [-e qemu|spike|both] [-d DIR] [-s] [-l] [WORKLOAD ...]
+#
+#   -e EMU    emulator(s) to run (default: both)
+#   -d DIR    output directory (default: rv32_build/traces)
+#   -s        don't capture: recompute the .stats.txt files from the
+#             saved traces (e.g. after changing trace-stats.py)
+#   -l        list the workloads and exit
+#
+# With no WORKLOAD, runs all of them. For each one, DIR gets
+#   <emu>-<workload>.trace.zst    the compressed trace
+#   <emu>-<workload>.stats.txt    trace-stats.py --split output
+#   <emu>-<workload>.info.txt     command, emulator, date, version
+#   <emu>-<workload>.console.txt  the guest's console output
+
+IMAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+EXT_DIR="@EXT_DIR@"
+ZSTD="@HOST_DIR@/bin/zstd"
+# The system python3, not Buildroot's host one (built without lzma etc.)
+PYTHON=python3
+
+# name|command run in the guest|trace-qemu.sh options|run on Spike?
+WORKLOADS='ls|ls /||yes
+memhog|memhog -c 60 -n 8||yes
+lua|lua -e '"'"'local s=0 for i=1,10000 do s=s+i%7 end print(s)'"'"'||yes
+coremark|coremark|-n 20000000|no'
+# coremark is about 21 billion instructions, so it's capped at the first
+# 20M (about 60 iterations) on QEMU. Spike has no cap, so it's QEMU-only.
+
+emus=both dir="$(dirname "$IMAGE_DIR")/traces" stats_only=
+while getopts "e:d:slh" o; do
+	case $o in
+	e) emus=$OPTARG ;;
+	d) dir=$OPTARG ;;
+	s) stats_only=1 ;;
+	l) echo "$WORKLOADS" | awk -F'|' '{ printf "%-10s %s%s\n", $1, $2, $4 == "no" ? "   (QEMU only)" : "" }'
+	   exit 0 ;;
+	*) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 1 ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ "$emus" = both ] && emus="qemu spike"
+mkdir -p "$dir" || exit 1
+
+version=$(git -C "$EXT_DIR" describe --always --dirty 2>/dev/null || echo unknown)
+echo "$WORKLOADS" | while IFS='|' read -r name cmd qopts spike_ok; do
+	if [ $# -gt 0 ]; then
+		case " $* " in *" $name "*) ;; *) continue ;; esac
+	fi
+	for emu in $emus; do
+		if [ "$emu" = spike ] && [ "$spike_ok" != yes ]; then
+			echo "== $name: skipped on Spike (QEMU only)"
+			continue
+		fi
+		base="$dir/$emu-$name"
+		if [ -n "$stats_only" ]; then
+			[ -e "$base.trace.zst" ] || continue
+			echo "== $name on $emu: stats from $base.trace.zst"
+			{ cat "$base.info.txt"; echo
+			  "$PYTHON" "$IMAGE_DIR/trace-stats.py" --split "$base.trace.zst"
+			} > "$base.stats.txt"
+			continue
+		fi
+		echo "== $name on $emu: $cmd"
+		if [ "$emu" = qemu ]; then
+			# shellcheck disable=SC2086  # $qopts is a list of options
+			"$IMAGE_DIR/trace-qemu.sh" -o "$base.trace" $qopts -x "$cmd" \
+				> "$base.console.txt" 2>&1
+		else
+			"$IMAGE_DIR/trace-spike.sh" -o "$base.trace" -x "$cmd" \
+				> "$base.console.txt" 2>&1
+		fi
+		if [ ! -s "$base.trace" ]; then
+			echo "   no trace written, see $base.console.txt" >&2
+			continue
+		fi
+		{
+			echo "workload: $name ($cmd)"
+			echo "emulator: $emu ${qopts:+(trace-qemu.sh $qopts)}"
+			echo "captured: $(date '+%Y-%m-%d %H:%M') from custom_rv32 $version"
+		} > "$base.info.txt"
+		{ cat "$base.info.txt"; echo
+		  "$PYTHON" "$IMAGE_DIR/trace-stats.py" --split "$base.trace"
+		} > "$base.stats.txt"
+		"$ZSTD" -q -f -T0 --rm "$base.trace" -o "$base.trace.zst"
+		echo "   $(du -h "$base.trace.zst" | cut -f1) trace, stats in $base.stats.txt"
+	done
+done

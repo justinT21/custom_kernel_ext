@@ -1,0 +1,107 @@
+#!/bin/sh
+# Capture a commit log (instructions, register writes, memory accesses)
+# and/or cache statistics on Spike (docs/tracing.md).
+#
+#   trace-spike.sh [options] [-- extra Spike args]
+#
+#   -o FILE   trace file (default: spike.trace)
+#   -x CMD    run CMD in the guest at boot, traced, then exit (no login)
+#   -a        trace everything from reset, ignoring the markers (huge)
+#   -u        keep only user-mode (U, priv 0) instructions
+#   -d        add disassembly to each line (spike-dasm)
+#   -I S:W:B  model an L1 I-cache: S sets, W ways, B-byte lines (--ic)
+#   -D S:W:B  model an L1 D-cache (--dc)
+#   -L S:W:B  model an L2 behind both L1s (--l2)
+#   -c FILE   cache statistics file (default: spike.cache.txt)
+#   -N        no commit log, only cache statistics (much faster)
+#
+# Cache statistics cover the same window as the trace (all of the run
+# with -a) and are printed at the end. E.g. 32 KiB 4-way, 64-byte lines:
+#   trace-spike.sh -N -I 128:4:64 -D 128:4:64 -x "ls /"
+#
+# Without -x the console is interactive: log in, run `tracemark on`, your
+# commands, `tracemark off`, then press Ctrl-c twice to quit Spike.
+
+IMAGE_DIR="$(dirname "$0")"
+PATH="@HOST_DIR@/bin:${PATH}"
+
+out=spike.trace cmd= all= user= dasm= caches= cstats=spike.cache.txt nolog=
+while getopts "o:x:audI:D:L:c:Nh" o; do
+	case $o in
+	o) out=$OPTARG ;;
+	x) cmd=$OPTARG ;;
+	a) all=1 ;;
+	u) user=1 ;;
+	d) dasm=1 ;;
+	I) caches="$caches --ic=$OPTARG" ;;
+	D) caches="$caches --dc=$OPTARG" ;;
+	L) caches="$caches --l2=$OPTARG" ;;
+	c) cstats=$OPTARG ;;
+	N) nolog=1 ;;
+	*) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 1 ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+if [ -n "$nolog" ] && [ -n "$user$dasm" ]; then
+	echo "trace-spike: -u and -d need the commit log (no -N)" >&2
+	exit 1
+fi
+
+[ -n "$all" ] || { SPIKE_TRACE_GATE=1; export SPIKE_TRACE_GATE; }
+# The patched Spike writes the cache statistics here when it exits
+SPIKE_CACHE_STATS=$cstats
+export SPIKE_CACHE_STATS
+rm -f "$cstats"
+raw=$out
+[ -n "$user$dasm" ] && raw="$out.raw"
+[ -n "$nolog" ] || set -- --log-commits --log="$raw" "$@"
+# $caches is unquoted on purpose: zero or more --ic/--dc/--l2 options
+set -- $caches "$@"
+
+# Ctrl-c belongs to Spike (twice to quit); keep this script alive to
+# post-process the log afterwards.
+trap '' INT
+if [ -z "$cmd" ]; then
+	"$IMAGE_DIR/start-spike.sh" "$@"
+else
+	# Run until the guest's S99autorun says it's done. Spike has no
+	# poweroff: a SIGINT opens its debugger, which reads "quit" from
+	# --debug-cmd and exits cleanly (flushing the log).
+	fifo=$(mktemp -u "${TMPDIR:-/tmp}/trace-spike.XXXXXX")
+	quit=$(mktemp "${TMPDIR:-/tmp}/trace-spike-quit.XXXXXX")
+	echo quit > "$quit"
+	mkfifo "$fifo" || exit 1
+	"$IMAGE_DIR/start-spike.sh" --debug-cmd="$quit" \
+		--bootargs="console=ttyS0 earlycon autorun=\"$cmd\"" "$@" \
+		< /dev/null > "$fifo" 2>&1 &
+	pid=$!
+	# Keep draining the console until Spike exits, so it never blocks
+	# writing to the FIFO.
+	done=
+	while IFS= read -r line; do
+		[ -n "$done" ] && continue
+		printf '%s\n' "$line"
+		case $line in
+		*@AUTORUN_DONE@*) done=1; kill -INT "$pid" 2>/dev/null ;;
+		esac
+	done < "$fifo"
+	wait "$pid" 2>/dev/null
+	rm -f "$fifo" "$quit"
+fi
+
+if [ -z "$nolog" ] && [ "$raw" != "$out" ]; then
+	# Fields: core N: PRIV PC (INSN) ...; priv 0 = user, 3 = machine
+	if [ -n "$user" ]; then awk '$3 == "0"' "$raw"; else cat "$raw"; fi |
+	if [ -n "$dasm" ]; then
+		sed -E 's/\((0x[0-9a-f]+)\)/(\1) DASM(\1)/' | spike-dasm
+	else
+		cat
+	fi > "$out"
+	rm -f "$raw"
+fi
+[ -n "$nolog" ] || echo "trace-spike: $(wc -l < "$out") lines in $out" >&2
+if [ -s "$cstats" ]; then
+	cat "$cstats"
+	echo "trace-spike: cache statistics in $cstats" >&2
+fi

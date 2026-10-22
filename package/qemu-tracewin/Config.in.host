@@ -1,0 +1,11 @@
+config BR2_PACKAGE_HOST_QEMU_TRACEWIN
+	bool "host qemu tracewin plugin"
+	depends on BR2_PACKAGE_HOST_QEMU
+	help
+	  QEMU TCG plugin that logs instructions (and loads/stores,
+	  optionally register writes) between the trace markers, at close
+	  to full speed outside them. Installed as
+	  $(HOST_DIR)/lib/qemu-plugins/libtracewin.so and used by
+	  images/trace-qemu.sh.
+
+	  See docs/tracing.md in the custom_rv32 external tree.

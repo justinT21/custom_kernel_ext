@@ -1,1 +1,3 @@
-# Custom package options can go here later
+source "$BR2_EXTERNAL_CUSTOM_RV32_PATH/package/memhog/Config.in"
+source "$BR2_EXTERNAL_CUSTOM_RV32_PATH/package/tracemark/Config.in"
+source "$BR2_EXTERNAL_CUSTOM_RV32_PATH/package/qemu-tracewin/Config.in.host"

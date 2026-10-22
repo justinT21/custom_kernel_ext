@@ -1,0 +1,8 @@
+config BR2_PACKAGE_MEMHOG
+	bool "memhog"
+	help
+	  Allocates and touches memory to measure how much RAM user
+	  programs can get on the no-MMU kernel: the largest single
+	  (contiguous) block and the total in small blocks.
+
+	  Source: src/memhog/ in the custom_rv32 external tree.

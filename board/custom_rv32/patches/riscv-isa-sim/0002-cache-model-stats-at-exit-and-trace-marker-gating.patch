@@ -1,0 +1,265 @@
+From: custom_rv32
+Subject: [PATCH] cache model: stats at any exit, trace marker gating
+
+Spike prints the --ic/--dc/--l2 statistics from the cache destructors,
+which only run when main() returns. The "quit" debug command and a
+second Ctrl-c call exit() instead, so the statistics were lost. Print
+them from atexit() too (once), and to the file named by
+SPIKE_CACHE_STATS if it's set.
+
+With SPIKE_TRACE_GATE set, only count accesses between the trace markers
+"addi x0, x0, 0x5a1" (on) and "addi x0, x0, 0x5a0" (off), the same
+markers that gate --log-commits. The markers are detected in addi
+itself, so this works without --log-commits. Outside the window the
+cache contents are still simulated, so each window starts warm. The
+instructions retired inside the windows are reported too, with misses
+per 1K instructions for each cache.
+
+Also report a 0% miss rate instead of NaN for a cache with no accesses.
+
+See docs/tracing.md in the custom_rv32 external tree.
+---
+--- a/riscv/cachesim.cc
++++ b/riscv/cachesim.cc
+@@ -5,11 +5,71 @@
+ #include <cstdlib>
+ #include <iostream>
+ #include <iomanip>
++#include <fstream>
++#include <vector>
++#include <algorithm>
++
++static const bool gate = getenv("SPIKE_TRACE_GATE") != nullptr;
++bool cache_sim_t::counting = !gate;
++
++// Instructions retired inside trace windows
++static uint64_t window_insns = 0;
++static uint64_t window_start = 0;
++
++static std::vector<cache_sim_t*>& all_caches()
++{
++  static std::vector<cache_sim_t*> caches;
++  return caches;
++}
++
++// Spike's "quit" command and a second Ctrl-c call exit(), which skips the
++// destructors in main(), so the statistics are printed from atexit() too.
++static void register_cache(cache_sim_t* c)
++{
++  if (all_caches().empty())
++    std::atexit(cache_sim_t::print_all_stats);
++  all_caches().push_back(c);
++}
++
++void cache_sim_t::trace_marker(bool on, uint64_t minstret)
++{
++  if (!gate || on == counting)
++    return;
++  counting = on;
++  if (on)
++    window_start = minstret;
++  else
++    window_insns += minstret - window_start;
++}
++
++void cache_sim_t::print_all_stats()
++{
++  static bool printed = false;
++  if (printed || all_caches().empty())
++    return;
++  printed = true;
++
++  const char* path = getenv("SPIKE_CACHE_STATS");
++  std::ofstream file;
++  if (path) {
++    file.open(path);
++    if (!file)
++      std::cerr << "spike: can't write cache statistics to " << path << std::endl;
++  }
++  std::ostream& out = file.is_open() ? file : std::cout;
++
++  // A window still open at exit is counted up to its last marker only
++  if (gate)
++    out << "Window Instructions:      " << window_insns << std::endl;
++  for (auto c : all_caches())
++    c->print_stats(out);
++}
+ 
+ cache_sim_t::cache_sim_t(size_t _sets, size_t _ways, size_t _linesz, const char* _name)
+ : sets(_sets), ways(_ways), linesz(_linesz), name(_name), log(false)
+ {
+   init();
++  register_cache(this);
+ }
+ 
+ static void help()
+@@ -66,35 +126,49 @@
+ {
+   tags = new uint64_t[sets*ways];
+   memcpy(tags, rhs.tags, sets*ways*sizeof(uint64_t));
++  register_cache(this);
+ }
+ 
+ cache_sim_t::~cache_sim_t()
+ {
+-  print_stats();
++  print_all_stats();
++  auto& caches = all_caches();
++  caches.erase(std::remove(caches.begin(), caches.end(), this), caches.end());
+   delete [] tags;
+ }
+ 
+ void cache_sim_t::print_stats()
+ {
+-  float mr = 100.0f*(read_misses+write_misses)/(read_accesses+write_accesses);
++  print_stats(std::cout);
++}
+ 
+-  std::cout << std::setprecision(3) << std::fixed;
+-  std::cout << name << " ";
+-  std::cout << "Bytes Read:            " << bytes_read << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Bytes Written:         " << bytes_written << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Read Accesses:         " << read_accesses << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Write Accesses:        " << write_accesses << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Read Misses:           " << read_misses << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Write Misses:          " << write_misses << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Writebacks:            " << writebacks << std::endl;
+-  std::cout << name << " ";
+-  std::cout << "Miss Rate:             " << mr << '%' << std::endl;
++void cache_sim_t::print_stats(std::ostream& out)
++{
++  uint64_t accesses = read_accesses + write_accesses;
++  uint64_t misses = read_misses + write_misses;
++  float mr = accesses ? 100.0f*misses/accesses : 0.0f;
++
++  out << std::setprecision(3) << std::fixed;
++  out << name << " ";
++  out << "Bytes Read:            " << bytes_read << std::endl;
++  out << name << " ";
++  out << "Bytes Written:         " << bytes_written << std::endl;
++  out << name << " ";
++  out << "Read Accesses:         " << read_accesses << std::endl;
++  out << name << " ";
++  out << "Write Accesses:        " << write_accesses << std::endl;
++  out << name << " ";
++  out << "Read Misses:           " << read_misses << std::endl;
++  out << name << " ";
++  out << "Write Misses:          " << write_misses << std::endl;
++  out << name << " ";
++  out << "Writebacks:            " << writebacks << std::endl;
++  out << name << " ";
++  out << "Miss Rate:             " << mr << '%' << std::endl;
++  if (gate && window_insns) {
++    out << name << " ";
++    out << "Misses per 1K Insns:   " << 1000.0*misses/window_insns << std::endl;
++  }
+ }
+ 
+ uint64_t* cache_sim_t::check_tag(uint64_t addr)
+@@ -120,8 +194,12 @@
+ 
+ void cache_sim_t::access(uint64_t addr, size_t bytes, bool store)
+ {
+-  store ? write_accesses++ : read_accesses++;
+-  (store ? bytes_written : bytes_read) += bytes;
++  // Outside the trace window the cache contents are still simulated, so
++  // the window starts with warm caches, but nothing is counted.
++  if (counting) {
++    store ? write_accesses++ : read_accesses++;
++    (store ? bytes_written : bytes_read) += bytes;
++  }
+ 
+   uint64_t* hit_way = check_tag(addr);
+   if (likely(hit_way != NULL))
+@@ -131,8 +209,9 @@
+     return;
+   }
+ 
+-  store ? write_misses++ : read_misses++;
+-  if (log)
++  if (counting)
++    store ? write_misses++ : read_misses++;
++  if (log && counting)
+   {
+     std::cerr << name << " "
+               << (store ? "write" : "read") << " miss 0x"
+@@ -146,7 +225,8 @@
+     uint64_t dirty_addr = (victim & ~(VALID | DIRTY)) << idx_shift;
+     if (miss_handler)
+       miss_handler->access(dirty_addr, linesz, true);
+-    writebacks++;
++    if (counting)
++      writebacks++;
+   }
+ 
+   if (miss_handler)
+@@ -167,7 +247,8 @@
+     {
+       if (clean) {
+         if (*hit_way & DIRTY) {
+-          writebacks++;
++          if (counting)
++            writebacks++;
+           *hit_way &= ~DIRTY;
+         }
+       }
+--- a/riscv/cachesim.h
++++ b/riscv/cachesim.h
+@@ -9,6 +9,7 @@
+ #include <string>
+ #include <map>
+ #include <cstdint>
++#include <iosfwd>
+ 
+ class lfsr_t
+ {
+@@ -30,11 +31,20 @@
+   void access(uint64_t addr, size_t bytes, bool store);
+   void clean_invalidate(uint64_t addr, size_t bytes, bool clean, bool inval);
+   void print_stats();
++  void print_stats(std::ostream& out);
+   void set_miss_handler(cache_sim_t* mh) { miss_handler = mh; }
+   void set_log(bool _log) { log = _log; }
+ 
+   static cache_sim_t* construct(const char* config, const char* name);
+ 
++  // Called by the trace marker instructions (addi x0, x0, 0x5a1 / 0x5a0).
++  // With SPIKE_TRACE_GATE set, statistics only count between them.
++  static void trace_marker(bool on, uint64_t minstret);
++  // Print every cache's statistics, once: to the file named by
++  // SPIKE_CACHE_STATS if set, else to stdout. Runs at the first cache's
++  // destruction or at exit(), whichever comes first.
++  static void print_all_stats();
++
+  protected:
+   static const uint64_t VALID = 1ULL << 63;
+   static const uint64_t DIRTY = 1ULL << 62;
+@@ -63,6 +73,8 @@
+   std::string name;
+   bool log;
+ 
++  static bool counting;
++
+   void init();
+ };
+ 
+--- a/riscv/insns/addi.h
++++ b/riscv/insns/addi.h
+@@ -1 +1,3 @@
++if (unlikely(insn.bits() == 0x5a100013 || insn.bits() == 0x5a000013))
++  cache_sim_t::trace_marker(insn.bits() == 0x5a100013, STATE.minstret->read());
+ WRITE_RD(sext_xlen(RS1 + insn.i_imm()));
+--- a/riscv/insn_template.h
++++ b/riscv/insn_template.h
+@@ -8,4 +8,5 @@
+ #include "specialize.h"
+ #include "tracer.h"
+ #include "v_ext_macros.h"
++#include "cachesim.h"
+ #include <assert.h>

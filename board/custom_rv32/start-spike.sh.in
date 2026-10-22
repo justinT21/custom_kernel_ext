@@ -5,8 +5,7 @@
 # Override SPIKE to use another spike binary.
 
 IMAGE_DIR="$(dirname "$0")"
-# spike runs dtc at startup
-PATH="@HOST_DIR@/bin:${PATH}"
+PATH="@HOST_DIR@/bin:${PATH}"  # spike runs dtc at startup
 : "${SPIKE:=spike}"
 
 exec "${SPIKE}" \

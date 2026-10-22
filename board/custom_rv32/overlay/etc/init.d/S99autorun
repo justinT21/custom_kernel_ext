@@ -1,0 +1,16 @@
+#!/bin/sh
+# Batch tracing (images/trace-*.sh -x CMD, see docs/tracing.md): if the
+# kernel command line has autorun="CMD", run CMD between trace markers at
+# the end of boot, then print a line the trace scripts wait for.
+
+[ "$1" = start ] || exit 0
+cmd=$(sed -n 's/.*autorun="\([^"]*\)".*/\1/p' /proc/cmdline)
+[ -n "$cmd" ] || exit 0
+
+echo "autorun: $cmd"
+tracemark on
+sh -c "$cmd"
+status=$?
+tracemark off
+echo "autorun: exit status $status"
+echo "@AUTORUN_DONE@"

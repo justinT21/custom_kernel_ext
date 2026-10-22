@@ -1,0 +1,9 @@
+config BR2_PACKAGE_TRACEMARK
+	bool "tracemark"
+	help
+	  `tracemark on|off` executes a trace marker instruction, to
+	  start or stop QEMU (tracewin plugin) and Spike
+	  (SPIKE_TRACE_GATE) tracing. Also installs <trace_marker.h>
+	  with TRACE_ON()/TRACE_OFF() for other packages.
+
+	  See docs/tracing.md in the custom_rv32 external tree.

@@ -1,0 +1,73 @@
+#!/bin/sh
+# Capture an instruction trace on QEMU virt (docs/tracing.md).
+#
+#   trace-qemu.sh [options] [-- extra QEMU args]
+#
+#   -o FILE   trace file (default: qemu.trace)
+#   -x CMD    run CMD in the guest at boot, traced, then exit (no login)
+#   -a        trace everything from reset, ignoring the markers (huge)
+#   -r        also log integer register writes
+#   -M        don't log loads/stores
+#   -n N      stop tracing after N instructions
+#   -p NAME   use QEMU plugin libNAME.so instead of tracewin, with its
+#             options after commas, e.g. -p bb or -p cache,dcachesize=16384
+#   -R        guest time follows the host clock (default: -icount
+#             shift=0,sleep=off, 1 instruction = 1 ns like Spike, so traces
+#             are repeatable and tracing doesn't add timer interrupts)
+#
+# Without -x the console is interactive: log in, run `tracemark on`, your
+# commands, `tracemark off`, then `poweroff -f` (or press Ctrl-a x).
+
+IMAGE_DIR="$(dirname "$0")"
+PLUGIN_DIR="@HOST_DIR@/lib/qemu-plugins"
+
+out=qemu.trace cmd= opts= plugin=tracewin icount="-icount shift=0,sleep=off"
+while getopts "o:x:arMn:p:Rh" o; do
+	case $o in
+	o) out=$OPTARG ;;
+	x) cmd=$OPTARG ;;
+	a) opts="$opts,all=on" ;;
+	r) opts="$opts,regs=on" ;;
+	M) opts="$opts,mem=off" ;;
+	n) opts="$opts,max=$OPTARG" ;;
+	p) plugin=$OPTARG ;;
+	R) icount= ;;
+	*) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 1 ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+name=${plugin%%,*}
+args=${plugin#"$name"}
+if [ "$name" != tracewin ] && [ -n "$opts" ]; then
+	echo "trace-qemu: -a/-r/-M/-n only apply to tracewin" >&2
+	exit 1
+fi
+so="$PLUGIN_DIR/lib$name.so"
+[ -e "$so" ] || { echo "trace-qemu: no plugin $so" >&2; exit 1; }
+
+# $icount is unquoted on purpose: empty, or two words
+set -- $icount -plugin "$so$args$opts" -d plugin -D "$out" "$@"
+if [ -z "$cmd" ]; then
+	"$IMAGE_DIR/start-qemu.sh" "$@"
+else
+	# Run until the guest's S99autorun says it's done
+	fifo=$(mktemp -u "${TMPDIR:-/tmp}/trace-qemu.XXXXXX")
+	mkfifo "$fifo" || exit 1
+	"$IMAGE_DIR/start-qemu.sh" -append "earlycon autorun=\"$cmd\"" "$@" \
+		< /dev/null > "$fifo" 2>&1 &
+	pid=$!
+	# Keep draining the console until QEMU exits: if nothing reads the
+	# FIFO, QEMU blocks writing to it and never handles the SIGTERM.
+	done=
+	while IFS= read -r line; do
+		[ -n "$done" ] && continue
+		printf '%s\n' "$line"
+		case $line in
+		*@AUTORUN_DONE@*) done=1; kill "$pid" 2>/dev/null ;;
+		esac
+	done < "$fifo"
+	wait "$pid" 2>/dev/null
+	rm -f "$fifo"
+fi
+echo "trace-qemu: $(wc -l < "$out") lines in $out" >&2

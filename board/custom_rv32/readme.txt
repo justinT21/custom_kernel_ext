@@ -9,11 +9,86 @@ initramfs, so images/kernel.elf is the only image needed. It is vmlinux
 with the ELF physical (load) addresses moved to DRAM by post-image.sh;
 plain vmlinux has them 0-based and loaders would place it at address 0.
 
-Build (out of tree, from the buildroot checkout):
+Build
+-----
 
+The build is out of tree. The expected directory layout is:
+
+    siliconjackets/
+        custom_kernel/        Buildroot checkout (sources only)
+        custom_kernel_ext/    this BR2_EXTERNAL tree
+        rv32_build/           output directory (O=), created by step 1
+
+Run these from custom_kernel_ext/ (BR2_EXTERNAL=$PWD and the ../ paths
+depend on that):
+
+    # 1. Configure. Creates ../rv32_build with a .config generated from
+    #    configs/custom_rv32_defconfig and a Makefile that forwards to
+    #    Buildroot with O= set. Only needed once, or after editing
+    #    the defconfig. The BR2_EXTERNAL path is saved in
+    #    ../rv32_build/.br2-external.mk, so later make calls don't
+    #    need it.
     make -C ../custom_kernel O=$PWD/../rv32_build \
          BR2_EXTERNAL=$PWD custom_rv32_defconfig
+
+    # 2. Build everything.
     make -C ../rv32_build
+
+The first build takes a while. Buildroot builds everything from source
+into rv32_build/, in this order:
+
+  1. Host tools (host/): binutils, gcc and uClibc-ng for
+     riscv32-buildroot-linux-uclibc (BR2_RISCV_32, no MMU, so FLAT
+     binaries), plus dtc, qemu-system-riscv32 (BR2_PACKAGE_HOST_QEMU)
+     and spike (BR2_PACKAGE_HOST_RISCV_ISA_SIM). Source tarballs are
+     downloaded to custom_kernel/dl/.
+  2. Userspace (target/, staging/): busybox and uClibc-ng, with
+     overlay/ copied on top.
+  3. rootfs.cpio is packed from target/.
+  4. Linux 6.18.7 (build/linux-6.18.7/): arch/riscv/configs/
+     nommu_virt_defconfig, then linux-nommu.fragment merged on top. The
+     result is build/linux-6.18.7/.config. Because of
+     BR2_TARGET_ROOTFS_INITRAMFS, the kernel is linked last with
+     rootfs.cpio embedded. BR2_LINUX_KERNEL_VMLINUX installs vmlinux in
+     images/.
+  5. post-image.sh: images/vmlinux -> images/kernel.elf (load addresses
+     fixed up) and start-{qemu,spike}.sh.in -> images/start-*.sh.
+
+What rv32_build/ contains:
+
+    .config          Buildroot config (from custom_rv32_defconfig)
+    Makefile         forwards `make -C rv32_build <target>` to Buildroot
+    build/<pkg>/     unpacked source and build tree of each package
+    host/            cross toolchain, dtc, qemu, spike (host/bin/)
+    staging/         sysroot used for cross-compiling (headers, libs)
+    target/          root filesystem before packing
+    images/          kernel.elf, vmlinux, rootfs.cpio, start-*.sh
+
+Common targets after the first build (all run as make -C ../rv32_build ...):
+
+    linux-rebuild        rebuild the kernel after editing its sources in
+                         build/linux-6.18.7/ (the edits are lost on a
+                         linux-dirclean)
+    linux-menuconfig     change the kernel config interactively. The
+                         change only lasts until the next defconfig +
+                         fragment merge, so copy options you want to
+                         keep into linux-nommu.fragment
+    linux-dirclean       delete build/linux-6.18.7/; the next make
+                         unpacks it again
+    menuconfig           change Buildroot options
+    savedefconfig        write the Buildroot config back to
+                         configs/custom_rv32_defconfig
+    clean                delete everything in rv32_build/ except .config
+                         (a full rebuild follows)
+
+After editing linux-nommu.fragment, a plain `make -C ../rv32_build` is
+enough. Buildroot sees that the fragment changed, merges defconfig +
+fragment again and rebuilds the kernel.
+
+The initramfs is inside vmlinux, so a userspace change (e.g. new files
+in overlay/) also needs the kernel relinked. A plain
+`make -C ../rv32_build` handles that too: it repacks rootfs.cpio and
+relinks the kernel (rootfs-initramfs -> linux-rebuild-with-initramfs).
 
 Run:
 
@@ -38,6 +113,190 @@ The kernel has both the ns16550 driver (ttyS0) and the SiFive UART driver
 earlycon, so no console= is needed. With no bootargs from the loader
 (e.g. QEMU without -append), the command line is CONFIG_CMDLINE
 ("earlycon"). Spike always passes its own bootargs.
+
+
+Device tree
+===========
+
+This tree has no .dts files, and the build compiles no DTB:
+BR2_LINUX_KERNEL_DTS_SUPPORT is off, CONFIG_BUILTIN_DTB is not set and
+build/linux-6.18.7/arch/riscv/boot/dts/dtbs-list is empty. The DTB is
+generated at boot by the simulator:
+
+  * QEMU: -M virt builds a DTB for the virt machine in memory (from -m,
+    -smp, -cpu, ...). With -bios none, QEMU puts its address in a1 and
+    jumps to the kernel.
+  * Spike: writes a DTS from --isa, -m, -p, ..., compiles it with dtc
+    (that's why start-spike.sh puts host/bin, which has dtc, on PATH)
+    and places it in its boot ROM, which passes it in a1.
+
+To see what the kernel gets:
+
+    qemu-system-riscv32 -M virt,dumpdtb=virt.dtb -cpu rv32,mmu=off -m 128M
+    dtc -I dtb -O dts virt.dtb
+
+    spike --isa=rv32imafdc_zicntr_zihpm -m128 --dump-dts \
+          ../rv32_build/images/kernel.elf
+
+Using your own DT (e.g. one for a custom core, see the minimal example at
+the end of this file):
+
+  * Passed at run time, no rebuild needed:
+        dtc -I dts -O dtb -o my.dtb my.dts      # host/bin/dtc
+        ../rv32_build/images/start-qemu.sh -dtb my.dtb
+        ../rv32_build/images/start-spike.sh --dtb=my.dtb
+    (QEMU still emulates the virt machine, so the DT must match its
+    hardware.)
+
+  * Built by Buildroot into images/: put the source in a vendor
+    subdirectory, e.g. board/custom_rv32/dts/custom/my-core.dts, and add
+    to configs/custom_rv32_defconfig:
+        BR2_LINUX_KERNEL_DTS_SUPPORT=y
+        BR2_LINUX_KERNEL_CUSTOM_DTS_DIR="$(BR2_EXTERNAL_CUSTOM_RV32_PATH)/board/custom_rv32/dts"
+    Buildroot copies the dts/ directory over the kernel's
+    arch/riscv/boot/dts/, builds every .dts in it and installs
+    images/my-core.dtb. Since Linux 6.12, BR2_LINUX_KERNEL_CUSTOM_DTS_PATH
+    is deprecated, so don't use it. Re-run step 1 of the build (or
+    `make -C ../rv32_build menuconfig`) after editing the defconfig.
+
+  * Linked into the kernel, for a core with no boot ROM to pass a1:
+    add CONFIG_BUILTIN_DTB=y and CONFIG_BUILTIN_DTB_NAME="custom/my-core"
+    (relative to arch/riscv/boot/dts, without .dts) to
+    linux-nommu.fragment, together with the CUSTOM_DTS_DIR setup above
+    so that the file is in the kernel tree.
+
+
+Boot handoff, memory layout and monitoring
+==========================================
+
+Neither simulator appends the DTB to the kernel or loads it next to
+the kernel. Each one generates the DTB, puts it at its own address and
+passes that address in a1. Both start at a small reset stub at
+0x1000. Nothing runs at 0x0: both put a debug-module region there
+(an empty placeholder on QEMU virt).
+
+  QEMU virt, -bios none (hw/riscv/boot.c):
+    0x1000      reset stub: a0 = mhartid, a1 = 0x87e00000, jump to
+                0x80000000 (the kernel.elf entry)
+    0x87e00000  DTB (about 5 KB): the end of DRAM minus the DTB size,
+                rounded down to 2 MiB. Its address depends on -m.
+                A -dtb file goes to the same place.
+
+  Spike (riscv/sim.cc):
+    0x1000      boot ROM: the reset stub, then the DTB right after it at
+                0x1020. a1 = 0x1020. The DTB is in ROM, outside DRAM.
+
+The kernel never copies the raw blob. It parses it where it is
+(head.S passes a1 to setup_vm(), parse_dtb()) and reserves it in memblock
+if it is in RAM, so on QEMU 0x87e00000-0x87e01fff stays "Reserved"
+in /proc/iomem. unflatten_device_tree() then builds the in-kernel tree
+in a ~12 KB memblock allocation. The original blob is still readable
+as /sys/firmware/fdt. With CONFIG_BUILTIN_DTB, head.S ignores a1 and
+uses __dtb_start, a copy linked into the kernel's init data. The kernel
+copies it (unflatten_and_copy_device_tree) before init memory is freed.
+
+Kernel size (Linux 6.18.7, this config, initramfs included):
+
+    kernel.elf file           3.4 MiB (includes symbols, not loaded)
+    loaded bytes (FileSiz)    2.8 MiB  0x80000000-0x802cb10b
+    footprint (MemSiz)        2.9 MiB  0x80000000-0x802e539f (+ bss)
+      code 1489K, rodata 449K, rwdata 307K, init 610K, bss 100K
+    after boot                -604K: init text/data are freed, including
+                              the compressed initramfs (it is unpacked
+                              into the page cache as rootfs)
+
+Check with `riscv32-buildroot-linux-uclibc-readelf -lW kernel.elf` and
+`...-size -A kernel.elf` (in rv32_build/host/bin/). After a build the
+numbers may differ slightly from the ones above.
+
+RAM use at the login prompt with -m 128M (both simulators):
+
+    Memory: 126712K/131072K available (... 4144K reserved)
+      kernel image          2.9 MiB at the bottom of DRAM
+      struct page array     1 MiB  (32768 pages * 32 bytes)
+      DTB (QEMU only), per-cpu areas, early hash tables, the top page
+    MemTotal 127532 kB, MemFree ~122800 kB, so userspace + page
+    cache + slab are about 5 MB
+
+Minimum RAM, measured on QEMU by booting with smaller -m values:
+
+    -m      boot                                  memhog -c 60 at the prompt
+    6M      kernel panic: out of memory           -
+    8-16M   boots, but boot scripts and commands  -
+            fail: "binfmt_flat: Unable to
+            allocate RAM for process text/data"
+    20M     clean                                 11.6 MiB
+    24M     clean                                 15.6 MiB
+    32M     clean                                 23.4 MiB
+    48M     clean                                 39.0 MiB
+
+The limit is contiguous memory, not total free memory. A FLAT binary is
+"Load-to-Ram": each process gets its own copy of text + data + bss +
+stack in one physically contiguous block. For busybox that's 592 KiB
+(BSS End 0x8f710 + Stack 0x3e80, see flthdr below). The kernel serves
+that from an order-8 (1 MiB) block, so every command needs a free 1 MiB
+contiguous block. At 16M there was ~13 MB free but too fragmented.
+Use at least 32 MiB. The scripts use 128 MiB.
+
+Per-process RAM of any program in the image:
+
+    rv32_build/host/bin/riscv32-buildroot-linux-uclibc-flthdr \
+        rv32_build/target/usr/bin/<prog>
+    -> about BSS End + Stack Size, as one block rounded up to a
+       power-of-two order for the allocation (the unused tail is freed),
+       plus whatever the program mallocs
+
+memhog (package/memhog, source in src/memhog) measures what userspace
+can still get: `memhog -l` gives the largest single block (at most
+4 MiB, the kernel's order-10 limit), and `memhog -c 60` fills RAM in
+60 KiB blocks. Run `dmesg -n 1` first, or each failed allocation prints
+a memory dump to the console. Avoid power-of-two chunk sizes: 64 KiB +
+malloc's header takes a 128 KiB block, and the fill stops with half of
+RAM still free.
+
+Watching memory from inside the guest (free, top, uptime and watch come
+from busybox.fragment):
+
+    free -k                    total/used/free/cache
+    watch -n 1 free -k         the same, refreshed every second
+    top                        header line is right, but the RSS column
+                               is always 0 (no-MMU has no RSS)
+    cat /proc/meminfo          MemFree, Slab, KernelStack, MmapCopy, ...
+    vmstat 1                   free/cache once per second
+    cat /proc/<pid>/status     "Mem:" line = that process's allocation
+                               (no-MMU has no VmRSS)
+    cat /proc/<pid>/maps       its regions (stack, mmaps)
+    cat /proc/iomem            physical layout, as above
+    dmesg | grep Memory:       boot-time totals
+    boot with -append "earlycon memblock=debug" (QEMU) to log every
+    early reservation
+
+More busybox applets: add CONFIG_<APPLET>=y to busybox.fragment, see
+docs/adding-programs.md.
+
+From the host:
+
+  QEMU monitor: add `-monitor tcp:127.0.0.1:4444,server,nowait` and
+  connect with `nc 127.0.0.1 4444` (or press Ctrl-a c with -nographic):
+    xp /10wx 0x1000              reset stub (shows the entry and DTB addr)
+    xp /2wx 0x87e00000           DTB header (0xedfe0dd0 = magic, LE)
+    info mtree -f                address map
+    pmemsave 0x80000000 0x8000000 ram.bin    dump all of DRAM
+  gdb: start-qemu.sh -s -S, then
+    gdb-multiarch ../rv32_build/images/vmlinux   (Arch: riscv64-elf-gdb)
+    (gdb) target remote :1234
+    The build has no cross gdb. Set BR2_PACKAGE_HOST_GDB=y to get
+    rv32_build/host/bin/riscv32-buildroot-linux-uclibc-gdb.
+
+  Spike: start-spike.sh -d (or press Ctrl-c while running) opens the
+  interactive debugger:
+    mem 87e00000                 read a physical address
+    reg 0 a1                     register of core 0
+    until pc 0 80000000          run to an address
+  Spike allocates guest RAM in 4 KiB host pages the first time the
+  guest touches each one, so host RSS (`ps -o rss= -C spike`) roughly
+  tracks the guest pages that have ever been used. QEMU's RSS includes
+  its own JIT and device memory, so it isn't a useful guest number.
 
 
 Hardware requirements for a custom core

@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Instruction-mix statistics for trace-qemu.sh and trace-spike.sh traces.
+
+    trace-stats.py TRACE [TRACE ...] [--split] [--top N]
+
+TRACE can be compressed (.zst, .gz, .xz), as trace-workloads.sh saves them.
+
+Classifies every instruction from its encoding (RV32IMAFDC + Zicsr/
+Zifencei, compressed included), so QEMU and Spike traces are counted the
+same way. Branch outcomes are exact: the target is decoded from the
+instruction and compared with the next PC in the trace (a branch followed
+by an interrupt or trap is counted as "interrupted").
+
+--split  also report user and kernel separately. Spike traces have the
+         privilege level; QEMU traces don't, so instructions inside the
+         kernel's text (read from images/vmlinux) count as kernel.
+--top N  list the N most executed instructions by mnemonic (default 10).
+"""
+
+import argparse
+import collections
+import os
+import subprocess
+import sys
+
+IMAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+NM = "@HOST_DIR@/bin/riscv32-buildroot-linux-uclibc-nm"
+ZSTD = "@HOST_DIR@/bin/zstd"
+
+# Order of the rows in the report
+CLASSES = [
+    "branch", "jump", "call", "return", "jump-indirect",
+    "load", "store", "fp-load", "fp-store", "atomic",
+    "alu", "mul/div", "fp", "csr/system", "fence", "cbo", "other",
+]
+
+
+def sext(v, bits):
+    return v - (1 << bits) if v & (1 << (bits - 1)) else v
+
+
+def classify(w):
+    """(class, size, branch_offset or None, mnemonic-ish name)"""
+    if w & 3 != 3:
+        return classify_c(w & 0xFFFF)
+    op = w & 0x7F
+    rd = (w >> 7) & 0x1F
+    rs1 = (w >> 15) & 0x1F
+    f3 = (w >> 12) & 7
+    if op == 0x63:
+        imm = (((w >> 31) & 1) << 12 | ((w >> 7) & 1) << 11 |
+               ((w >> 25) & 0x3F) << 5 | ((w >> 8) & 0xF) << 1)
+        name = {0: "beq", 1: "bne", 4: "blt", 5: "bge", 6: "bltu", 7: "bgeu"}.get(f3, "b?")
+        return "branch", 4, sext(imm, 13), name
+    if op == 0x6F:
+        return ("call" if rd == 1 else "jump"), 4, None, "jal"
+    if op == 0x67:
+        if rd == 0 and rs1 == 1:
+            return "return", 4, None, "ret"
+        return ("call" if rd == 1 else "jump-indirect"), 4, None, "jalr"
+    if op == 0x03:
+        return "load", 4, None, {0: "lb", 1: "lh", 2: "lw", 4: "lbu", 5: "lhu"}.get(f3, "l?")
+    if op == 0x23:
+        return "store", 4, None, {0: "sb", 1: "sh", 2: "sw"}.get(f3, "s?")
+    if op == 0x07:
+        return "fp-load", 4, None, "fl"
+    if op == 0x27:
+        return "fp-store", 4, None, "fs"
+    if op == 0x2F:
+        return "atomic", 4, None, {2: "lr", 3: "sc"}.get(w >> 27, "amo")
+    if op == 0x33:
+        if (w >> 25) == 1:
+            return "mul/div", 4, None, ["mul", "mulh", "mulhsu", "mulhu",
+                                        "div", "divu", "rem", "remu"][f3]
+        return "alu", 4, None, "op"
+    if op in (0x13, 0x37, 0x17):
+        return "alu", 4, None, {0x13: "op-imm", 0x37: "lui", 0x17: "auipc"}[op]
+    if op in (0x53, 0x43, 0x47, 0x4B, 0x4F):
+        return "fp", 4, None, "fp-op"
+    if op == 0x73:
+        if f3 == 0:
+            name = {0x00000073: "ecall", 0x00100073: "ebreak", 0x30200073: "mret",
+                    0x10500073: "wfi"}.get(w, "system")
+        else:
+            name = "csr"
+        return "csr/system", 4, None, name
+    if op == 0x0F:
+        if f3 == 2:                           # Zicbom/Zicboz cache-block ops
+            return "cbo", 4, None, {0: "cbo.inval", 1: "cbo.clean", 2: "cbo.flush",
+                                    4: "cbo.zero"}.get(w >> 20, "cbo")
+        return "fence", 4, None, "fence.i" if f3 == 1 else "fence"
+    return "other", 4, None, "?"
+
+
+def classify_c(h):
+    q = h & 3
+    f3 = h >> 13
+    if q == 0:
+        c, n = {0: ("alu", "c.addi4spn"), 1: ("fp-load", "c.fld"), 2: ("load", "c.lw"),
+                3: ("fp-load", "c.flw"), 5: ("fp-store", "c.fsd"), 6: ("store", "c.sw"),
+                7: ("fp-store", "c.fsw")}.get(f3, ("other", "c.?"))
+        return c, 2, None, n
+    if q == 1:
+        if f3 == 1:
+            return "call", 2, None, "c.jal"
+        if f3 == 5:
+            return "jump", 2, None, "c.j"
+        if f3 in (6, 7):
+            imm = (((h >> 12) & 1) << 8 | ((h >> 5) & 3) << 6 | ((h >> 2) & 1) << 5 |
+                   ((h >> 10) & 3) << 3 | ((h >> 3) & 3) << 1)
+            return "branch", 2, sext(imm, 9), "c.beqz" if f3 == 6 else "c.bnez"
+        return "alu", 2, None, {0: "c.addi", 2: "c.li", 3: "c.lui", 4: "c.alu"}[f3]
+    # q == 2
+    if f3 == 4:
+        b12 = (h >> 12) & 1
+        rs1 = (h >> 7) & 0x1F
+        rs2 = (h >> 2) & 0x1F
+        if b12 == 0:
+            if rs2 == 0:
+                return ("return" if rs1 == 1 else "jump-indirect"), 2, None, "c.jr"
+            return "alu", 2, None, "c.mv"
+        if rs2 == 0:
+            if rs1 == 0:
+                return "csr/system", 2, None, "c.ebreak"
+            return "call", 2, None, "c.jalr"
+        return "alu", 2, None, "c.add"
+    c, n = {0: ("alu", "c.slli"), 1: ("fp-load", "c.fldsp"), 2: ("load", "c.lwsp"),
+            3: ("fp-load", "c.flwsp"), 5: ("fp-store", "c.fsdsp"), 6: ("store", "c.swsp"),
+            7: ("fp-store", "c.fswsp")}[f3]
+    return c, 2, None, n
+
+
+def kernel_text():
+    vmlinux = os.path.join(IMAGE_DIR, "vmlinux")
+    try:
+        out = subprocess.run([NM, vmlinux], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    syms = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] in ("_stext", "_etext"):
+            syms[parts[2]] = int(parts[0], 16)
+    if len(syms) == 2:
+        return syms["_stext"], syms["_etext"]
+    return None
+
+
+class Stats:
+    def __init__(self):
+        self.n = 0
+        self.cls = collections.Counter()
+        self.names = collections.Counter()
+        self.compressed = 0
+        self.br = collections.Counter()   # taken/not-taken/interrupted x fwd/bwd
+        self.loads = self.stores = 0
+        self.ilines = set()
+        self.dlines = set()
+        self.blocks = 0                   # control transfers (for block length)
+
+
+def open_trace(path):
+    if path.endswith(".zst"):
+        try:
+            from compression import zstd      # Python 3.14+
+            return zstd.open(path, "rt", errors="replace")
+        except ImportError:
+            tool = ZSTD if os.path.exists(ZSTD) else "zstd"
+            proc = subprocess.Popen([tool, "-dc", path], stdout=subprocess.PIPE,
+                                    text=True, errors="replace")
+            return proc.stdout
+    if path.endswith(".gz"):
+        import gzip
+        return gzip.open(path, "rt", errors="replace")
+    if path.endswith(".xz"):
+        import lzma
+        return lzma.open(path, "rt", errors="replace")
+    return open(path, errors="replace")
+
+
+def parse(path, split, ktext):
+    """Yields (bucket, pc, word, mem) per instruction; mem = [(is_store, addr)]"""
+    with open_trace(path) as f:
+        for line in f:
+            t = line.split()
+            if not t:
+                continue
+            try:
+                if t[0] == "core":            # Spike commit log
+                    priv = int(t[2])
+                    pc = int(t[3], 16)
+                    word = int(t[4].strip("()"), 16)
+                    mem = []
+                    i = 5
+                    while i < len(t):
+                        if t[i] == "mem" and i + 1 < len(t):
+                            if i + 2 < len(t) and t[i + 2].startswith("0x"):
+                                mem.append((True, int(t[i + 1], 16)))
+                                i += 3
+                            else:
+                                mem.append((False, int(t[i + 1], 16)))
+                                i += 2
+                        else:
+                            i += 1
+                    bucket = ("user" if priv == 0 else "kernel") if split else None
+                else:                         # QEMU tracewin
+                    pc = int(t[0], 16)
+                    word = int(t[1].strip("()"), 16)
+                    mem = []
+                    for i in range(2, len(t) - 1):
+                        if t[i] in ("load", "store") and t[i + 1].startswith("0x"):
+                            mem.append((t[i] == "store", int(t[i + 1], 16)))
+                    bucket = None
+                    if split and ktext:
+                        bucket = "kernel" if ktext[0] <= pc < ktext[1] else "user"
+            except (ValueError, IndexError):
+                continue
+            yield bucket, pc, word, mem
+
+
+def collect(paths, split):
+    ktext = kernel_text() if split else None
+    if split and not ktext and any(not open_trace(p).readline().startswith("core")
+                                   for p in paths):
+        print("trace-stats: can't read kernel text range from images/vmlinux; "
+              "QEMU lines won't be split", file=sys.stderr)
+    stats = collections.defaultdict(Stats)
+    for path in paths:
+        prev = None                           # (stats objects, pc, size, offset)
+        for bucket, pc, word, mem in parse(path, split, ktext):
+            cls, size, off, name = classify(word)
+            targets = [stats["all"]] + ([stats[bucket]] if bucket else [])
+            if prev:
+                pstats, ppc, psize, poff = prev
+                kind = ("taken" if pc == ppc + poff else
+                        "not-taken" if pc == ppc + psize else "interrupted")
+                d = "bwd" if poff < 0 else "fwd"
+                for s in pstats:
+                    s.br[kind, d] += 1
+                prev = None
+            for s in targets:
+                s.n += 1
+                s.cls[cls] += 1
+                s.names[name] += 1
+                s.compressed += size == 2
+                s.ilines.add(pc >> 6)
+                for is_store, addr in mem:
+                    if is_store:
+                        s.stores += 1
+                    else:
+                        s.loads += 1
+                    s.dlines.add(addr >> 6)
+                if cls in ("branch", "jump", "call", "return", "jump-indirect") \
+                        or name in ("ecall", "mret"):
+                    s.blocks += 1
+            if off is not None:
+                prev = (targets, pc, size, off)
+    return stats
+
+
+def pct(a, b):
+    return 100.0 * a / b if b else 0.0
+
+
+def report(name, s, top):
+    print(f"== {name}: {s.n:,} instructions")
+    if not s.n:
+        return
+    print(f"   {'class':<15}{'count':>12}{'%':>8}")
+    for c in CLASSES:
+        if s.cls[c]:
+            print(f"   {c:<15}{s.cls[c]:>12,}{pct(s.cls[c], s.n):>7.2f}%")
+    ctrl = sum(s.cls[c] for c in ("branch", "jump", "call", "return", "jump-indirect"))
+    print(f"   {'control flow':<15}{ctrl:>12,}{pct(ctrl, s.n):>7.2f}%  (all of the branch/jump rows)")
+    br = s.br
+    taken = br["taken", "fwd"] + br["taken", "bwd"]
+    nt = br["not-taken", "fwd"] + br["not-taken", "bwd"]
+    intr = br["interrupted", "fwd"] + br["interrupted", "bwd"]
+    print(f"   conditional branches: {pct(taken, taken + nt):.1f}% taken "
+          f"({taken:,} taken, {nt:,} not taken, {intr:,} interrupted)")
+    for d, label in (("fwd", "forward"), ("bwd", "backward")):
+        t, n = br["taken", d], br["not-taken", d]
+        print(f"     {label:<9} {t + n:>10,} branches, {pct(t, t + n):5.1f}% taken")
+    print(f"   compressed (RVC): {pct(s.compressed, s.n):.1f}% of instructions")
+    print(f"   avg basic block: {s.n / s.blocks:.2f} instructions" if s.blocks else "")
+    if s.loads or s.stores:
+        print(f"   memory accesses: {s.loads:,} loads, {s.stores:,} stores "
+              f"({pct(s.loads + s.stores, s.n):.1f} per 100 instructions)")
+        print(f"   footprint (64 B lines): {len(s.ilines):,} code "
+              f"({len(s.ilines) * 64 // 1024} KiB), {len(s.dlines):,} data "
+              f"({len(s.dlines) * 64 // 1024} KiB)")
+    else:
+        print(f"   code footprint (64 B lines): {len(s.ilines):,} ({len(s.ilines) * 64 // 1024} KiB)")
+    if top:
+        print(f"   top {top}: " + ", ".join(f"{k} {pct(v, s.n):.1f}%"
+                                         for k, v in s.names.most_common(top)))
+    print()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("traces", nargs="+")
+    ap.add_argument("--split", action="store_true", help="report user and kernel separately")
+    ap.add_argument("--top", type=int, default=10, help="most common instructions to list")
+    a = ap.parse_args()
+    stats = collect(a.traces, a.split)
+    report("all", stats["all"], a.top)
+    for b in ("user", "kernel"):
+        if b in stats:
+            report(b, stats[b], a.top)
+
+
+if __name__ == "__main__":
+    main()

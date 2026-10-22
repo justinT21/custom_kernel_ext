@@ -36,3 +36,7 @@ CONFIG_CMDLINE_FALLBACK=y
 # CONFIG_CMDLINE_FORCE is not set
 
 CONFIG_KALLSYMS=y
+
+# /dev/mem, for busybox devmem (see busybox.fragment): read and write
+# physical addresses such as MMIO registers from userspace.
+CONFIG_DEVMEM=y

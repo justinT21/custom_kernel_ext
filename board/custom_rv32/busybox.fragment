@@ -1,0 +1,29 @@
+# Applets added on top of Buildroot's package/busybox/busybox-minimal.config
+# (used automatically for no-MMU builds). Add CONFIG_<APPLET>=y lines here
+# and run `make -C ../rv32_build`. Busybox's own Config.in names are
+# listed by `make -C ../rv32_build busybox-menuconfig`.
+#
+# Every applet makes busybox bigger, and on no-MMU every busybox process
+# gets its own copy of busybox in RAM. Check BSS End with flthdr after
+# changes (see board/custom_rv32/readme.txt, "Minimum RAM").
+
+# Memory and process monitoring
+CONFIG_FREE=y
+CONFIG_TOP=y
+CONFIG_UPTIME=y
+CONFIG_WATCH=y
+CONFIG_PIDOF=y
+# Not here: timeout and time don't work on this no-MMU build
+# (timeout never kills the command; time reports garbage user time).
+
+# Files
+CONFIG_FIND=y
+CONFIG_STAT=y
+CONFIG_LESS=y
+CONFIG_HEXDUMP=y
+CONFIG_STRINGS=y
+
+# Hardware bring-up: read/write physical addresses (MMIO). Needs
+# CONFIG_DEVMEM in linux-nommu.fragment. E.g.
+# `devmem 0x10000005 8` reads the ns16550 line status register
+CONFIG_DEVMEM=y
