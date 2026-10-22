@@ -306,7 +306,8 @@ Everything below was checked against the Linux 6.18.7 sources this build
 uses (arch/riscv/kernel/head.S, entry.S, traps_misaligned.c, cpufeature.c,
 drivers/clocksource/timer-clint.c, drivers/irqchip/irq-sifive-plic.c,
 irq-riscv-intc.c). "Required" means the kernel or userspace will not boot
-or run without it.
+or run without it. docs/core-requirements.md has the same requirements
+as a checklist.
 
 Unprivileged ISA
 ----------------
@@ -324,6 +325,12 @@ Required:
     does not emulate FP. The kernel only supports F together with D (it
     ignores F-without-D). For a core without an FPU, switch Buildroot to
     the ilp32 ABI (unset RVF/RVD) and set "# CONFIG_FPU is not set".
+
+  * Every FENCE encoding. Barriers use many pred/succ combinations, and
+    cpu_relax() runs `pause` (= fence w,0, 0x0100000f) in every spin
+    loop, on every core except MIPS P8700. Decode any FENCE as legal.
+  * Division by zero must not trap (it returns all ones, per the spec):
+    cpu_relax() also divides by zero on purpose, as a stall.
 
 Optional (compiled in, but used only when the DT advertises them, via
 runtime patching): V/Zve32x, Zba, Zbb, Zbkb, Zicboz, Zacas, Zabha, Zawrs.
@@ -400,8 +407,16 @@ Traps the kernel must receive (mcause):
               8 ecall from U-mode (system calls)
   There are no page faults (12/13/15) without an MMU.
 
-Other instructions: mret and wfi (used by the idle loop; may be a nop).
-ecall/ebreak must trap as described above.
+Other instructions: mret and wfi. ecall/ebreak must trap as described
+above. The idle loop runs wfi with mstatus.MIE = 0 and enables interrupts
+after it, so wfi must wake when (mip & mie) != 0 regardless of MIE, as
+the spec requires. A wfi that waits for MIE = 1 hangs at the first idle.
+wfi may also be a nop.
+
+Harts: the kernel is built without SMP and without
+CONFIG_RISCV_BOOT_SPINWAIT, so it has no "hart lottery". Every hart that
+jumps to it runs the whole boot at once. Only one hart may enter the
+kernel; park the others in the boot ROM and list only that hart in the DT.
 
 CLINT / ACLINT
 --------------

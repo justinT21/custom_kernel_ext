@@ -5,7 +5,9 @@ RV32IMAFDC Linux 6.18.7 kernel with a busybox initramfs. The same
 `kernel.elf` boots on QEMU `virt`, on Spike and on a custom core. Build and
 run with the steps below. For how the image works, the device tree and
 custom-core requirements, see
-[board/custom_rv32/readme.txt](board/custom_rv32/readme.txt).
+[board/custom_rv32/readme.txt](board/custom_rv32/readme.txt). For the checklist of
+what a RISC-V core needs to boot it (ISA, CSRs, CLINT, PLIC, UART), see
+[docs/core-requirements.md](docs/core-requirements.md).
 
 To boot the kernel without building anything, use the prebuilt image:
 see [Run without building](#run-without-building-prebuilt).
