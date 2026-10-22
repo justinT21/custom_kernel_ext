@@ -31,12 +31,12 @@ QEMU=/path/to/qemu-system-riscv32 prebuilt/start-qemu.sh   # another binary (SPI
 
 Log in as `root` (no password).
 
-| File                    | What it is                                                     |
-|-------------------------|----------------------------------------------------------------|
-| `kernel.elf`            | Kernel + initramfs, the same file as `images/kernel.elf`       |
-| `start-qemu.sh`, `start-spike.sh` | The same emulator options as `images/`, but using the emulators in your `PATH` |
+| File                                           | What it is                                                                                     |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `kernel.elf`                                   | Kernel + initramfs, the same file as `images/kernel.elf`                                       |
+| `start-qemu.sh`, `start-spike.sh`              | The same emulator options as `images/`, but using the emulators in your `PATH`                 |
 | `config/linux.config`, `config/busybox.config` | The full kernel and busybox configs it was built with (the tree itself only has the fragments) |
-| `BUILD-INFO.txt`        | Git version, build date, component versions, sha256 of each file |
+| `BUILD-INFO.txt`                               | Git version, build date, component versions, sha256 of each file                               |
 
 What doesn't work with system emulators:
 
@@ -68,7 +68,7 @@ is worth sharing rather than after every build.
 - The tools Buildroot needs
   ([manual, "System requirements"](https://buildroot.org/downloads/manual/manual.html#requirement)):
   `make gcc g++ binutils bash patch gzip bzip2 perl tar cpio unzip rsync
-  file bc findutils gawk wget sed which diffutils git`, plus
+file bc findutils gawk wget sed which diffutils git`, plus
   `python3`.
 
   - Debian/Ubuntu: `sudo apt install build-essential git wget cpio unzip rsync bc file python3`
@@ -92,7 +92,7 @@ The build is out of tree. Put three directories side by side:
 ```sh
 mkdir rv32 && cd rv32
 
-git clone <this-repo-url> custom_kernel_ext
+git clone https://github.com/justinT21/custom_kernel_ext custom_kernel_ext
 
 # Buildroot, pinned to the commit this tree was built and tested with
 git clone https://github.com/buildroot/buildroot.git custom_kernel
@@ -124,14 +124,14 @@ builds only redo what changed. Compiler output is cached in
 
 The results are in `../rv32_build/images/`:
 
-| File             | What it is                                                   |
-|------------------|--------------------------------------------------------------|
-| `kernel.elf`     | Kernel + initramfs, load address = 0x80000000. Boot this.    |
-| `vmlinux`        | Same kernel with 0-based load addresses (use for gdb symbols)|
-| `rootfs.cpio`    | The initramfs (already linked into the kernel)               |
-| `start-qemu.sh`  | Boots `kernel.elf` on the QEMU built above                   |
-| `start-spike.sh` | Boots `kernel.elf` on the Spike built above                  |
-| `trace-qemu.sh`, `trace-spike.sh` | Boot with tracing, see [Tracing](#tracing)  |
+| File                              | What it is                                                    |
+| --------------------------------- | ------------------------------------------------------------- |
+| `kernel.elf`                      | Kernel + initramfs, load address = 0x80000000. Boot this.     |
+| `vmlinux`                         | Same kernel with 0-based load addresses (use for gdb symbols) |
+| `rootfs.cpio`                     | The initramfs (already linked into the kernel)                |
+| `start-qemu.sh`                   | Boots `kernel.elf` on the QEMU built above                    |
+| `start-spike.sh`                  | Boots `kernel.elf` on the Spike built above                   |
+| `trace-qemu.sh`, `trace-spike.sh` | Boot with tracing, see [Tracing](#tracing)                    |
 
 ## Run
 
@@ -190,14 +190,22 @@ what to rebuild after each kind of change. In short:
 
 ## Changing things
 
-| To change...             | Edit                                     | Then run                                        |
-|--------------------------|------------------------------------------|-------------------------------------------------|
-| Kernel options           | `board/custom_rv32/linux-nommu.fragment` | `make -C ../rv32_build`                         |
-| Files in the rootfs      | `board/custom_rv32/overlay/`             | `make -C ../rv32_build`                         |
-| Buildroot options        | `make -C ../rv32_build menuconfig`       | `make -C ../rv32_build savedefconfig` and build |
-| Kernel source (hack)     | `../rv32_build/build/linux-6.18.7/`      | `make -C ../rv32_build linux-rebuild`           |
+| To change...         | Edit                                     | Then run                                        |
+| -------------------- | ---------------------------------------- | ----------------------------------------------- |
+| Kernel options       | `board/custom_rv32/linux-nommu.fragment` | `make -C ../rv32_build`                         |
+| Files in the rootfs  | `board/custom_rv32/overlay/`             | `make -C ../rv32_build`                         |
+| Buildroot options    | `make -C ../rv32_build menuconfig`       | `make -C ../rv32_build savedefconfig` and build |
+| Kernel source (hack) | `../rv32_build/build/linux-6.18.7/`      | `make -C ../rv32_build linux-rebuild`           |
 
 `board/custom_rv32/readme.txt` lists more targets and explains how to add a device tree.
 
 [docs/boot-and-device-tree.md](docs/boot-and-device-tree.md) explains how the
 kernel is started and gets its device tree, on the emulators and on real hardware.
+
+## License
+
+This tree (scripts, packages, patches, docs) is MIT licensed, see
+[LICENSE](LICENSE). The image it builds contains software under other
+licenses, mainly Linux and busybox (GPL-2.0) and uClibc-ng (LGPL-2.1).
+Each release has the matching source code attached
+(`custom_rv32-<version>-sources.tar`, from Buildroot's `make legal-info`).

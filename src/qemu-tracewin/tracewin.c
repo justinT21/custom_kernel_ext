@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * tracewin: QEMU TCG plugin that logs executed instructions between two
  * trace markers, and runs at close to full speed outside them.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * memhog: measure how much RAM user programs can get on the no-MMU kernel.
  *

@@ -1,4 +1,5 @@
 output/
+*.tar*
 dl/
 .config
 .config.old

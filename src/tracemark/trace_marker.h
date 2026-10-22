@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Trace markers (custom_rv32, see docs/tracing.md).
  *

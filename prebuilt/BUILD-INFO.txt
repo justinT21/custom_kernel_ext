@@ -1,7 +1,7 @@
 kernel.elf for custom_rv32 (RV32IMAFDC, no MMU, M-mode, busybox initramfs)
 
-custom_rv32:  5faffe0-dirty
-Built:        2026-10-21 14:13
+custom_rv32:  v0.1-dirty
+Built:        2026-10-22 13:32
 Linux:        6.18.7
 busybox:      1.38.0
 uClibc-ng:    1.0.59
@@ -9,6 +9,6 @@ gcc:          15.3.0
 Built with:   QEMU 11.0.0, Spike 00dfa28 (patched)
 
 sha256:
-6d2658f9a2907ef055b9cb6559f56d6c3de0e7eb357a0f9fa26921bfc62b1544  kernel.elf
+426b08207e174a41400779ab69be62f186bbf0615827fb8809d7de1c097a7340  kernel.elf
 4492cf4ad3e906588f02ef05ec88860bf8afbf590455f9209a91c0c889c67689  config/linux.config
 bbcb9eb9a8a9bf8a4e982f734fc79a1c796901ebedf51a4004db8021c5a91f81  config/busybox.config

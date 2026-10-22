@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * tracemark on|off: execute a trace marker, to start or stop QEMU/Spike
  * tracing from the shell:

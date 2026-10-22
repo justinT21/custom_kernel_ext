@@ -7,6 +7,8 @@
 TRACEMARK_VERSION = 1.0
 TRACEMARK_SITE = $(BR2_EXTERNAL_CUSTOM_RV32_PATH)/src/tracemark
 TRACEMARK_SITE_METHOD = local
+TRACEMARK_LICENSE = MIT
+TRACEMARK_LICENSE_FILES = LICENSE
 TRACEMARK_FLAT_STACKSIZE = 0x2000
 # Installs trace_marker.h into the sysroot, so other packages can
 # #include <trace_marker.h> (add tracemark to their _DEPENDENCIES)
